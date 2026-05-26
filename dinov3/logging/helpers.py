@@ -60,7 +60,17 @@ class MetricLogger(object):
         dict_to_dump.update({k: v.median for k, v in self.meters.items()})
         with open(self.output_file, "a") as f:
             f.write(json.dumps(dict_to_dump) + "\n")
-        pass
+
+        # ---- WandB integration (non-blocking) ----
+        try:
+            from dinov3.logging.wandb_logger import get_wandb_logger
+            wb = get_wandb_logger()
+            if wb is not None:
+                train_metrics = {f"train/{k}": v for k, v in dict_to_dump.items()
+                                 if k not in ("iteration",)}
+                wb.log(train_metrics, step=iteration)
+        except Exception:
+            pass  # Never let WandB break training
 
     def log_every(self, iterable, print_freq, header=None, n_iterations=None, start_iteration=0):
         i = start_iteration
