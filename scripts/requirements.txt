@@ -1,0 +1,13 @@
+# Core scientific stack
+numpy
+
+# Image processing
+Pillow
+pillow-heif
+
+# dataset statistics
+torch
+torchvision
+
+# Optional utilities
+tqdm

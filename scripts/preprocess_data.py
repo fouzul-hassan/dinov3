@@ -372,12 +372,24 @@ def compute_dataset_stats(
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+# Repo root is the parent of the directory this script lives in
+_SCRIPT_DIR = Path(__file__).resolve().parent   # .../dinov3/scripts/
+_REPO_ROOT   = _SCRIPT_DIR.parent               # .../dinov3/
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Preprocess thalassaemia microscopy data for DINOv3")
-    parser.add_argument("--raw-data-dir", type=str, default="data/raw-data",
-                        help="Path to raw-data directory")
-    parser.add_argument("--output-dir",   type=str, default="data/preprocessed",
-                        help="Path to write preprocessed data")
+    parser.add_argument(
+        "--raw-data-dir", type=str,
+        default=str(_REPO_ROOT / "data" / "raw-data"),
+        help="Path to raw-data directory (default: <repo-root>/data/raw-data)"
+    )
+    parser.add_argument(
+        "--output-dir", type=str,
+        default=str(_REPO_ROOT / "data" / "preprocessed"),
+        help="Path to write preprocessed data (default: <repo-root>/data/preprocessed)"
+    )
     parser.add_argument("--train-ratio",  type=float, default=0.70,
                         help="Fraction of patients for training (default 0.70)")
     parser.add_argument("--val-ratio",    type=float, default=0.15,
@@ -398,11 +410,31 @@ def main():
     logger.info("=" * 60)
     logger.info("DINOv3 Thalassaemia Preprocessing Pipeline")
     logger.info("=" * 60)
+    logger.info(f"Repo root : {_REPO_ROOT}")
     logger.info(f"Raw data  : {raw_data_dir}")
     logger.info(f"Output    : {output_dir}")
     logger.info(f"Split     : {args.train_ratio:.0%} train / {args.val_ratio:.0%} val / "
                 f"{1 - args.train_ratio - args.val_ratio:.0%} test")
     logger.info(f"Seed      : {args.seed}")
+
+    # ── Validate raw data directory exists ────────────────────────────────
+    if not raw_data_dir.exists():
+        logger.error(f"Raw data directory NOT FOUND: {raw_data_dir}")
+        logger.error("Please pass the correct path with --raw-data-dir, for example:")
+        logger.error(f"  python scripts/preprocess_data.py --raw-data-dir data/raw-data")
+        logger.error(f"  (run from the repo root: {_REPO_ROOT})")
+        sys.exit(1)
+
+    expected_classes = ["Negatives", "Other", "Positives"]
+    found_classes = [c for c in expected_classes if (raw_data_dir / c).is_dir()]
+    if not found_classes:
+        logger.error(
+            f"No expected class directories found in {raw_data_dir}\n"
+            f"Expected: {expected_classes}\n"
+            f"Found:    {[d.name for d in raw_data_dir.iterdir() if d.is_dir()]}"
+        )
+        sys.exit(1)
+    logger.info(f"Found class dirs: {found_classes}")
 
     # 0. Check HEIC support
     heif_available = _try_import_heif()

@@ -19,3 +19,4 @@ dist/
 
 # ignore all ./data/raw-data/
 data/raw-data/*
+data/preprocessed/*
