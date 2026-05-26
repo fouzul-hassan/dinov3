@@ -98,8 +98,9 @@ class ThalassaemiaDataset(ExtendedVisionDataset):
         transform: Optional[Callable] = None,
         target_transform: Optional[Callable] = None,
     ) -> None:
+        abs_root = os.path.abspath(root)
         super().__init__(
-            root=root,
+            root=abs_root,
             transforms=transforms,
             transform=transform,
             target_transform=target_transform,
@@ -107,11 +108,45 @@ class ThalassaemiaDataset(ExtendedVisionDataset):
             target_decoder=TargetDecoder,
         )
         self._split      = split
-        self._extra_root = extra if extra is not None else os.path.join(root, "metadata")
+        self._extra_root = os.path.abspath(extra) if extra is not None else os.path.abspath(os.path.join(abs_root, "metadata"))
 
         self._entries     = None
         self._class_ids   = None
         self._class_names = None
+
+        # Early validation check to avoid failing deep inside training loop
+        self._validate_images_exist()
+
+    def _validate_images_exist(self) -> None:
+        """Verify that the first few images exist to catch missing files early."""
+        try:
+            entries = self._get_entries()
+            if len(entries) == 0:
+                raise ValueError(f"The metadata entries list for split {self._split.value} is empty!")
+            
+            # Check up to 5 images to confirm paths are correct and files exist
+            num_to_check = min(5, len(entries))
+            for i in range(num_to_check):
+                entry = entries[i]
+                class_name = str(entry["class_name"])
+                filename = str(entry["filename"])
+                image_relpath = self._split.get_image_relpath(class_name, filename)
+                image_fullpath = os.path.join(self.root, image_relpath)
+                
+                if not os.path.exists(image_fullpath):
+                    raise FileNotFoundError(
+                        f"Image file not found: '{image_fullpath}'\n"
+                        f"The metadata file '{self._get_extra_full_path(self._entries_path)}' was loaded successfully,\n"
+                        f"but the actual preprocessed image file is missing.\n"
+                        f"Please ensure you copied/mounted the entire 'preprocessed/' directory containing the image splits,\n"
+                        f"not just the 'metadata/' directory."
+                    )
+        except FileNotFoundError as e:
+            # Let FileNotFoundError propagate with our helpful context
+            raise e
+        except Exception as e:
+            logger.warning(f"Image validation skipped due to error: {e}")
+
 
     # ------------------------------------------------------------------
     # Properties

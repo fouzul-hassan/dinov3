@@ -94,6 +94,33 @@ def check_prerequisites(output_dir: str):
     for f in ["entries-TRAIN.npy", "labels.txt"]:
         if not (meta_dir / f).exists():
             issues.append(f"Missing metadata file: {meta_dir / f}")
+        elif f == "entries-TRAIN.npy" and preprocessed.exists():
+            try:
+                import numpy as np
+                entries = np.load(meta_dir / f, allow_pickle=False)
+                if len(entries) == 0:
+                    issues.append("entries-TRAIN.npy is empty.")
+                else:
+                    # check first few images to verify files exist
+                    for i in range(min(5, len(entries))):
+                        entry = entries[i]
+                        cname = entry["class_name"]
+                        fname = entry["filename"]
+                        if isinstance(cname, bytes):
+                            cname = cname.decode("utf-8")
+                        if isinstance(fname, bytes):
+                            fname = fname.decode("utf-8")
+                        img_path = preprocessed / "train" / cname / fname
+                        if not img_path.exists():
+                            issues.append(
+                                f"Image file not found: {img_path}\n"
+                                f"  The metadata references this file, but it does not exist on disk.\n"
+                                f"  Did you forget to copy/mount the preprocessed image folders on Google Colab?\n"
+                                f"  Ensure both 'metadata/' and the split folders ('train/', 'val/', 'test/') are copied."
+                            )
+                            break
+            except Exception as e:
+                issues.append(f"Failed to read/validate entries-TRAIN.npy: {e}")
 
     if issues:
         logger.error("Prerequisites check FAILED:")
@@ -102,6 +129,7 @@ def check_prerequisites(output_dir: str):
         sys.exit(1)
 
     logger.info("✓ Prerequisites check passed")
+
 
 
 def setup_wandb(cfg, output_dir: str, enabled: bool = True):
