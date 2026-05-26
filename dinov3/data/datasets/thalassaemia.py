@@ -114,8 +114,26 @@ class ThalassaemiaDataset(ExtendedVisionDataset):
         self._class_ids   = None
         self._class_names = None
 
+        # Warm up file system to populate Google Drive / FUSE caches on Colab
+        self._warmup_directories()
+
         # Early validation check to avoid failing deep inside training loop
         self._validate_images_exist()
+
+    def _warmup_directories(self) -> None:
+        """Warm up directory contents by listing them to force Google Drive / FUSE sync."""
+        try:
+            split_dir = os.path.join(self.root, self._split.value)
+            if os.path.exists(split_dir):
+                logger.info(f"Warming up file system cache for {split_dir}...")
+                for class_name in self.CLASS_NAMES:
+                    class_dir = os.path.join(split_dir, class_name)
+                    if os.path.exists(class_dir):
+                        # Force reading directory contents to sync metadata from Google Drive
+                        _ = os.listdir(class_dir)
+                logger.info("File system cache warmed up successfully.")
+        except Exception as e:
+            logger.warning(f"File system warmup skipped/failed: {e}")
 
     def _validate_images_exist(self) -> None:
         """Verify that the first few images exist to catch missing files early."""
@@ -144,6 +162,7 @@ class ThalassaemiaDataset(ExtendedVisionDataset):
         except FileNotFoundError as e:
             # Let FileNotFoundError propagate with our helpful context
             raise e
+
         except Exception as e:
             logger.warning(f"Image validation skipped due to error: {e}")
 
