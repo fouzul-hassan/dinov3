@@ -46,41 +46,31 @@ logger = logging.getLogger("dinov3")
 
 def setup_single_gpu_distributed():
     """
-    Initialise torch.distributed for single-GPU operation.
-    DINOv3's training code requires distributed to be initialised,
-    even with a single GPU.
+    Verify the GPU environment for single-GPU Colab training.
+
+    DINOv3's TorchDistributedEnvironment automatically detects single-GPU
+    "MANUAL" mode (no SLURM_JOB_ID, no TORCHELASTIC_RUN_ID) and handles
+    all of rank/world_size/port setup internally via setup_job() → enable_distributed().
+
+    We do NOT call init_process_group or set any distributed env vars here —
+    that would cause the 'trying to initialize the default process group twice'
+    error because DINOv3's setup_job() calls init_process_group itself.
     """
     import torch
-    import torch.distributed as dist
 
-    if not dist.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "localhost")
-        os.environ.setdefault("MASTER_PORT", "29500")
-        os.environ.setdefault("RANK", "0")
-        os.environ.setdefault("WORLD_SIZE", "1")
-        os.environ.setdefault("LOCAL_RANK", "0")
+    if not torch.cuda.is_available():
+        logger.warning("⚠ No GPU detected — training will be extremely slow on CPU!")
+        logger.warning("  Make sure you have selected Runtime → GPU in Colab.")
+    else:
+        props = torch.cuda.get_device_properties(0)
+        total_vram = props.total_memory / 1024 ** 3
+        logger.info(f"GPU: {props.name}  |  VRAM: {total_vram:.1f} GB")
+        if total_vram < 10:
+            logger.warning(
+                f"Only {total_vram:.1f} GB VRAM detected. "
+                "Consider reducing batch_size_per_gpu or local_crops_number."
+            )
 
-        dist.init_process_group(
-            backend="nccl" if torch.cuda.is_available() else "gloo",
-            init_method="env://",
-            world_size=1,
-            rank=0,
-        )
-        logger.info("Initialised torch.distributed (single-GPU mode)")
-
-
-def print_gpu_info():
-    """Print GPU memory info — useful for Colab monitoring."""
-    try:
-        import torch
-        if torch.cuda.is_available():
-            props = torch.cuda.get_device_properties(0)
-            total = props.total_memory / 1024**3
-            logger.info(f"GPU: {props.name}  |  VRAM: {total:.1f} GB")
-        else:
-            logger.warning("No GPU detected — training will be very slow on CPU!")
-    except Exception:
-        pass
 
 
 def check_prerequisites(output_dir: str):
@@ -114,13 +104,24 @@ def check_prerequisites(output_dir: str):
     logger.info("✓ Prerequisites check passed")
 
 
-def setup_wandb(cfg, output_dir: str):
-    """Initialise WandB from config + environment."""
+def setup_wandb(cfg, output_dir: str, enabled: bool = True):
+    """Initialise WandB from config + environment.
+    
+    Disabled when any of the following are true:
+      - enabled=False  (--no-wandb flag was passed)
+      - WANDB_ENABLED=false  (environment variable)
+      - wandb is not installed  (silent no-op)
+    """
+    if not enabled:
+        logger.info("WandB logging disabled (--no-wandb)")
+        return None
     try:
         from dinov3.logging.wandb_logger import make_wandb_logger
         wb = make_wandb_logger(cfg)
         if wb.enabled:
-            logger.info("✓ WandB logging active")
+            logger.info("✓ WandB logging active — view at https://wandb.ai")
+        else:
+            logger.info("WandB logging inactive (not installed or WANDB_ENABLED=false)")
         return wb
     except Exception as e:
         logger.warning(f"WandB setup failed: {e}. Training will continue without W&B.")
@@ -129,9 +130,9 @@ def setup_wandb(cfg, output_dir: str):
 
 def run_training(args):
     """Main training entry point."""
-    # Setup distributed (required even for single GPU)
+    # Verify GPU + log info (distributed is handled entirely by DINOv3's setup_job below)
     setup_single_gpu_distributed()
-    print_gpu_info()
+
 
     # Check prerequisites
     check_prerequisites(args.output_dir)
@@ -152,7 +153,8 @@ def run_training(args):
     logger.info(f"Config:\n{cfg}")
 
     # ── WandB ──────────────────────────────────────────────────────────────
-    wb = setup_wandb(cfg, args.output_dir)
+    no_wandb = getattr(args, "no_wandb", False)
+    wb = setup_wandb(cfg, args.output_dir, enabled=not no_wandb)
 
     # ── Model ──────────────────────────────────────────────────────────────
     import math
@@ -204,6 +206,15 @@ def get_args_parser():
         "--skip-prerequisites",
         action="store_true",
         help="Skip the prerequisites check (not recommended)",
+    )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help=(
+            "Disable WandB logging entirely. "
+            "Equivalent to setting WANDB_ENABLED=false. "
+            "Useful when wandb is not configured or for quick debug runs."
+        ),
     )
     return parser
 
