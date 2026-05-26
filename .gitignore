@@ -16,3 +16,6 @@ dist/
 
 # Ignore vscode directory
 .vscode/
+
+# ignore all ./data/raw-data/
+data/raw-data/*
