@@ -180,6 +180,19 @@ def stratified_patient_split(
     return split_assignment
 
 
+def sanitize_patient_id(pid: str) -> str:
+    """Sanitize patient ID to make it safe for all file systems and Google Drive FUSE."""
+    import re
+    # Remove leading/trailing spaces, hyphens, and underscores
+    s = pid.strip(" -_")
+    # Replace spaces, hyphens, and other special characters with a single underscore
+    s = re.sub(r'[^a-zA-Z0-9]+', '_', s)
+    # Ensure it doesn't start with a hyphen or underscore, and prefix if it starts with non-alphanumeric
+    if not s or not s[0].isalnum():
+        s = "patient_" + s
+    return s
+
+
 # ---------------------------------------------------------------------------
 # Copy files into split folders
 # ---------------------------------------------------------------------------
@@ -210,9 +223,11 @@ def build_split_directories(
                     continue
 
                 for img_path in images:
-                    # Unique filename encodes patient and image name
-                    stem = f"{patient_id.replace(' ', '_')}__{img_path.stem}"
+                    # Unique filename encodes patient and image name (sanitized for Colab/Drive compatibility)
+                    clean_pid = sanitize_patient_id(patient_id)
+                    stem = f"{clean_pid}__{img_path.stem}"
                     dst = dst_class_dir / stem  # extension added in convert_and_copy_image
+
 
                     success = convert_and_copy_image(img_path, dst, heif_available)
                     if success:
