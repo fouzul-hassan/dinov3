@@ -84,36 +84,51 @@ def _load_dcp_backbone(ckpt_dir: Path, cfg, device: torch.device) -> nn.Module:
 
     logger.info(f"DCP checkpoint detected: {ckpt_dir}")
 
-    # Build backbone on CPU (no distributed init needed for single-GPU eval)
+    # build_model_from_cfg always creates on 'meta' device — use to_empty() not to()
     teacher, embed_dim = build_model_from_cfg(cfg, only_teacher=True)
-    teacher = teacher.to("cpu")
+    teacher = teacher.to_empty(device="cpu")   # materialize from meta → CPU
+    teacher.eval()
 
-    # Wrap in a dict so DCP can address the 'model' key
-    state_dict_container = {"model": teacher.state_dict()}
-
+    # Inspect the checkpoint keys first so we can map them correctly
     try:
-        dcp.load(
-            state_dict_container,
-            storage_reader=dcpfs.FileSystemReader(str(ckpt_dir)),
-        )
-        teacher.load_state_dict(state_dict_container["model"], strict=False)
-        logger.info("✓ DCP weights loaded (strict=False)")
+        reader = dcpfs.FileSystemReader(str(ckpt_dir))
+        metadata = reader.read_metadata()
+        all_keys = list(metadata.state_dict_metadata.keys())
+        logger.info(f"  DCP keys (first 5): {all_keys[:5]}")
     except Exception as e:
-        logger.warning(f"DCP full load failed ({e}), trying partial key match …")
-        # Try loading with prefix stripping (teacher.backbone.* → *)
-        raw = {}
-        dcp.load(
-            {"model": raw},
-            storage_reader=dcpfs.FileSystemReader(str(ckpt_dir)),
-        )
-        # Strip common prefixes
-        cleaned = {}
-        for k, v in raw.items():
-            for prefix in ("teacher.", "backbone.", "module."):
-                k = k.removeprefix(prefix)
-            cleaned[k] = v
-        missing, unexpected = teacher.load_state_dict(cleaned, strict=False)
-        logger.info(f"  missing={len(missing)}, unexpected={len(unexpected)}")
+        logger.warning(f"  Could not read DCP metadata: {e}")
+        all_keys = []
+
+    # Determine the key prefix used in the checkpoint
+    # Common patterns: "model.<layer>", "teacher.<layer>", plain "<layer>"
+    prefixes_seen = set(k.split(".")[0] for k in all_keys)
+    logger.info(f"  Top-level DCP key prefixes: {prefixes_seen}")
+
+    # Build a state-dict container matching exactly what's in the checkpoint
+    teacher_sd = teacher.state_dict()
+
+    # Try direct load first (keys match model keys)
+    load_sd = {"model": teacher_sd}
+    try:
+        dcp.load(load_sd, storage_reader=dcpfs.FileSystemReader(str(ckpt_dir)))
+        missing, unexpected = teacher.load_state_dict(load_sd["model"], strict=False)
+        logger.info(f"✓ DCP weights loaded — missing={len(missing)}, unexpected={len(unexpected)}")
+    except Exception as e1:
+        logger.warning(f"Direct DCP load failed ({e1}), trying prefix-stripped fallback …")
+        try:
+            # Load the raw tensors and strip common prefixes
+            raw: dict = {}
+            dcp.load({"model": raw}, storage_reader=dcpfs.FileSystemReader(str(ckpt_dir)))
+            cleaned = {}
+            for k, v in raw.items():
+                for prefix in ("teacher.", "backbone.", "module.", "model."):
+                    k = k.removeprefix(prefix)
+                cleaned[k] = v
+            missing, unexpected = teacher.load_state_dict(cleaned, strict=False)
+            logger.info(f"✓ Prefix-stripped load — missing={len(missing)}, unexpected={len(unexpected)}")
+        except Exception as e2:
+            logger.error(f"Both DCP load strategies failed: {e2}")
+            raise
 
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():
