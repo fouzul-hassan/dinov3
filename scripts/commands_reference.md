@@ -387,7 +387,8 @@ python scripts/run_linear_probe.py --checkpoint-dir outputs/pretrained/eval/trai
 |------|---------|
 | `scripts/preprocess_data.py` | Data preprocessing pipeline |
 | `scripts/run_ssl_colab.py` | SSL training launcher (Colab) |
-| `scripts/run_linear_probe.py` | Linear probe evaluation |
+| `scripts/evaluate_checkpoint.py` | **Unified eval: linear probe + KNN + t-SNE** |
+| `scripts/run_linear_probe.py` | Linear probe evaluation (legacy, needs .pth) |
 | `scripts/run_knn_eval.py` | k-NN evaluation |
 | `dinov3/configs/train/thalassaemia_vits16_scratch.yaml` | Config: train from scratch |
 | `dinov3/configs/train/thalassaemia_vits16_pretrained.yaml` | Config: fine-tune from pretrained |
@@ -396,4 +397,97 @@ python scripts/run_linear_probe.py --checkpoint-dir outputs/pretrained/eval/trai
 | `data/preprocessed/metadata/dataset_stats.json` | Dataset mean/std |
 | `data/preprocessed/metadata/split_manifest.json` | Patient → split assignment |
 | `outputs/<run>/training_metrics.json` | Training log (all iterations) |
-| `outputs/<run>/eval/<iter>/teacher_checkpoint.pth` | Saved teacher weights |
+| `outputs/<run>/ckpt/<iter>/` | DCP checkpoint dir (contains __0_0.distcp) |
+
+---
+
+## 10 — Evaluating a DCP Checkpoint (ckpt/999)
+
+The checkpoint at `outputs/thalassaemia_scratch/ckpt/999` uses PyTorch Distributed Checkpoint (DCP)
+format (`.distcp` files). Use `scripts/evaluate_checkpoint.py` which handles this natively.
+
+### 10.1 Install extra eval dependencies
+```bash
+pip install seaborn scikit-learn matplotlib
+# Optional, for UMAP instead of t-SNE:
+pip install umap-learn
+```
+
+### 10.2 KNN-only (fastest, no training needed)
+```bash
+python scripts/evaluate_checkpoint.py \
+    --ckpt-path   outputs/thalassaemia_scratch/ckpt/999 \
+    --data-root   ../preprocessed \
+    --output-dir  outputs/eval_999 \
+    --knn-only \
+    --knn-k       20
+```
+
+### 10.3 Linear probe + KNN + t-SNE (full evaluation)
+```bash
+python scripts/evaluate_checkpoint.py \
+    --ckpt-path   outputs/thalassaemia_scratch/ckpt/999 \
+    --data-root   ../preprocessed \
+    --output-dir  outputs/eval_999 \
+    --run-tsne \
+    --lp-epochs   30 \
+    --lp-lr       1e-3 \
+    --knn-k       20
+```
+
+### 10.4 With explicit config path
+```bash
+python scripts/evaluate_checkpoint.py \
+    --ckpt-path   outputs/thalassaemia_scratch/ckpt/999 \
+    --config-path outputs/thalassaemia_scratch/config.yaml \
+    --data-root   ../preprocessed \
+    --output-dir  outputs/eval_999 \
+    --run-tsne
+```
+
+### 10.5 UMAP instead of t-SNE (cleaner separation, faster)
+```bash
+python scripts/evaluate_checkpoint.py \
+    --ckpt-path   outputs/thalassaemia_scratch/ckpt/999 \
+    --data-root   ../preprocessed \
+    --output-dir  outputs/eval_999 \
+    --run-tsne \
+    --tsne-method umap
+```
+
+### 10.6 Output files produced
+```
+outputs/eval_999/
+├── eval_results.json          ← all metrics (accuracy, F1, etc.)
+├── linear_head.pth            ← saved linear probe weights
+├── confusion_matrix_knn.png   ← KNN confusion matrix heatmap
+├── confusion_matrix_linear.png← Linear probe confusion matrix heatmap
+├── tsne_all.png               ← t-SNE of all splits combined
+└── tsne_test.png              ← t-SNE of test split only
+```
+
+### 10.7 Full Colab notebook cells
+```python
+# Cell 1: Install dependencies
+!pip install seaborn scikit-learn matplotlib umap-learn -q
+
+# Cell 2: Run evaluation
+!python scripts/evaluate_checkpoint.py \
+    --ckpt-path   outputs/thalassaemia_scratch/ckpt/999 \
+    --data-root   ../preprocessed \
+    --output-dir  outputs/eval_iter999 \
+    --run-tsne \
+    --lp-epochs   30
+
+# Cell 3: Display results in Colab
+import json
+from IPython.display import Image, display
+
+with open("outputs/eval_iter999/eval_results.json") as f:
+    r = json.load(f)
+print(json.dumps(r, indent=2))
+
+display(Image("outputs/eval_iter999/confusion_matrix_linear.png"))
+display(Image("outputs/eval_iter999/tsne_all.png"))
+```
+
