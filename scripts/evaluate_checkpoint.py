@@ -76,91 +76,132 @@ IMAGENET_STD  = [0.229, 0.224, 0.225]
 # Checkpoint loading  (DCP + legacy .pth)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _load_dcp_backbone(ckpt_dir: Path, cfg, device: torch.device) -> nn.Module:
-    """Load backbone from a PyTorch Distributed Checkpoint directory."""
-    import torch.distributed.checkpoint as dcp
-    import torch.distributed.checkpoint.filesystem as dcpfs
+def _extract_teacher_backbone_from_flat(flat: dict, logger) -> dict:
+    """
+    Given a flat state dict (keys like 'model.teacher.backbone.cls_token'),
+    try known sub-prefixes in order and return the first matching sub-dict.
+    The returned dict has the sub-prefix stripped (keys like 'cls_token').
+    """
+    # Priority order: teacher backbone > teacher > student backbone > bare model
+    search_prefixes = [
+        "model.teacher.backbone.",
+        "model.teacher.",
+        "teacher.backbone.",
+        "teacher.",
+        "model.student.backbone.",
+        "student.backbone.",
+        "backbone.",
+        "model.",
+        "",      # bare — last resort
+    ]
+    for prefix in search_prefixes:
+        sub = {k[len(prefix):]: v for k, v in flat.items() if k.startswith(prefix)}
+        if sub:
+            logger.info(f"  Extracted {len(sub)} keys using prefix '{prefix}'")
+            return sub
+    return {}
+
+
+def _load_dcp_backbone(ckpt_dir: Path, cfg, device: torch.device):
+    """
+    Load the teacher backbone from a PyTorch Distributed Checkpoint (DCP) dir.
+
+    Strategy
+    --------
+    1.  Use `torch.distributed.checkpoint.format_utils.dcp_to_torch_save` to
+        convert the DCP directory into a flat state dict (no dist init needed).
+    2.  Inspect available top-level key prefixes and extract the teacher backbone
+        sub-dict by stripping the appropriate prefix.
+    3.  Load the sub-dict into a bare ViT backbone with strict=False.
+    """
+    import tempfile
     from dinov3.models import build_model_from_cfg
 
     logger.info(f"DCP checkpoint detected: {ckpt_dir}")
 
-    # build_model_from_cfg always creates on 'meta' device — use to_empty() not to()
+    # ── Step 1: convert DCP → flat .pth ────────────────────────────────────
+    tmp_pth = Path(tempfile.mktemp(suffix=".pth"))
+    logger.info(f"  Converting DCP → flat .pth  (tmp: {tmp_pth})")
+    try:
+        # Available in PyTorch ≥ 2.1
+        from torch.distributed.checkpoint.format_utils import dcp_to_torch_save
+        dcp_to_torch_save(str(ckpt_dir), str(tmp_pth))
+    except ImportError:
+        # Fallback for older PyTorch: manually consolidate shards
+        logger.warning("dcp_to_torch_save not available, trying manual DCP load …")
+        import torch.distributed.checkpoint as dcp
+        import torch.distributed.checkpoint.filesystem as dcpfs
+        raw: dict = {}
+        dcp.load(
+            {"model": raw},
+            storage_reader=dcpfs.FileSystemReader(str(ckpt_dir)),
+        )
+        torch.save({"model": raw}, str(tmp_pth))
+
+    full_state = torch.load(str(tmp_pth), map_location="cpu")
+    tmp_pth.unlink(missing_ok=True)   # clean up temp file
+
+    # ── Step 2: flatten nested dict if needed ───────────────────────────────
+    # dcp_to_torch_save returns {"model": {...}, "optimizer": {...}, ...}
+    # We only care about the model part
+    if isinstance(full_state, dict) and "model" in full_state:
+        model_flat = full_state["model"]
+    else:
+        model_flat = full_state
+
+    # Show available top-level keys for debugging
+    top_keys = sorted({k.split(".")[0] for k in model_flat.keys()})
+    logger.info(f"  Top-level flat keys: {top_keys}")
+    logger.info(f"  Sample keys: {list(model_flat.keys())[:5]}")
+
+    # ── Step 3: extract teacher.backbone sub-dict ───────────────────────────
+    backbone_sd = _extract_teacher_backbone_from_flat(model_flat, logger)
+    if not backbone_sd:
+        raise RuntimeError(
+            f"Could not locate teacher backbone weights in DCP checkpoint.\n"
+            f"Available top-level keys: {top_keys}\n"
+            f"Sample: {list(model_flat.keys())[:10]}"
+        )
+
+    # ── Step 4: build ViT and load weights ──────────────────────────────────
     teacher, embed_dim = build_model_from_cfg(cfg, only_teacher=True)
-    teacher = teacher.to_empty(device="cpu")   # materialize from meta → CPU
-    teacher.eval()
+    teacher = teacher.to_empty(device="cpu")    # meta → CPU (no data copy)
 
-    # Inspect the checkpoint keys first so we can map them correctly
-    try:
-        reader = dcpfs.FileSystemReader(str(ckpt_dir))
-        metadata = reader.read_metadata()
-        all_keys = list(metadata.state_dict_metadata.keys())
-        logger.info(f"  DCP keys (first 5): {all_keys[:5]}")
-    except Exception as e:
-        logger.warning(f"  Could not read DCP metadata: {e}")
-        all_keys = []
-
-    # Determine the key prefix used in the checkpoint
-    # Common patterns: "model.<layer>", "teacher.<layer>", plain "<layer>"
-    prefixes_seen = set(k.split(".")[0] for k in all_keys)
-    logger.info(f"  Top-level DCP key prefixes: {prefixes_seen}")
-
-    # Build a state-dict container matching exactly what's in the checkpoint
-    teacher_sd = teacher.state_dict()
-
-    # Try direct load first (keys match model keys)
-    load_sd = {"model": teacher_sd}
-    try:
-        dcp.load(load_sd, storage_reader=dcpfs.FileSystemReader(str(ckpt_dir)))
-        missing, unexpected = teacher.load_state_dict(load_sd["model"], strict=False)
-        logger.info(f"✓ DCP weights loaded — missing={len(missing)}, unexpected={len(unexpected)}")
-    except Exception as e1:
-        logger.warning(f"Direct DCP load failed ({e1}), trying prefix-stripped fallback …")
-        try:
-            # Load the raw tensors and strip common prefixes
-            raw: dict = {}
-            dcp.load({"model": raw}, storage_reader=dcpfs.FileSystemReader(str(ckpt_dir)))
-            cleaned = {}
-            for k, v in raw.items():
-                for prefix in ("teacher.", "backbone.", "module.", "model."):
-                    k = k.removeprefix(prefix)
-                cleaned[k] = v
-            missing, unexpected = teacher.load_state_dict(cleaned, strict=False)
-            logger.info(f"✓ Prefix-stripped load — missing={len(missing)}, unexpected={len(unexpected)}")
-        except Exception as e2:
-            logger.error(f"Both DCP load strategies failed: {e2}")
-            raise
+    missing, unexpected = teacher.load_state_dict(backbone_sd, strict=False)
+    logger.info(f"✓ Teacher backbone loaded — missing={len(missing)}, unexpected={len(unexpected)}")
+    if missing:
+        logger.warning(f"  First missing keys: {missing[:5]}")
+    if unexpected:
+        logger.warning(f"  First unexpected keys: {unexpected[:5]}")
 
     teacher = teacher.to(device).eval()
     for p in teacher.parameters():
         p.requires_grad_(False)
-    logger.info(f"Backbone embed_dim={embed_dim}")
+    logger.info(f"  embed_dim = {embed_dim}")
     return teacher, embed_dim
 
 
-def _load_pth_backbone(pth_path: Path, cfg, device: torch.device) -> nn.Module:
-    """Load backbone from a legacy .pth checkpoint."""
+def _load_pth_backbone(pth_path: Path, cfg, device: torch.device):
+    """Load backbone from a legacy consolidated .pth checkpoint."""
     from dinov3.models import build_model_from_cfg
 
     logger.info(f"Legacy .pth checkpoint: {pth_path}")
     ckpt = torch.load(str(pth_path), map_location="cpu")
 
-    if "teacher" in ckpt:
-        state = ckpt["teacher"]
-    elif "model" in ckpt:
-        state = ckpt["model"]
+    # Unwrap common top-level keys
+    if isinstance(ckpt, dict):
+        state = ckpt.get("teacher", ckpt.get("model", ckpt))
     else:
         state = ckpt
 
-    # Strip prefixes
-    cleaned = {}
-    for k, v in state.items():
-        for prefix in ("backbone.", "module.", "teacher."):
-            k = k.removeprefix(prefix)
-        cleaned[k] = v
+    # Flatten into a single-level dict keyed like "cls_token", "blocks.0.…"
+    backbone_sd = _extract_teacher_backbone_from_flat(state, logger)
+    if not backbone_sd:
+        backbone_sd = state   # assume it's already a bare backbone state dict
 
     teacher, embed_dim = build_model_from_cfg(cfg, only_teacher=True)
-    teacher = teacher.to("cpu")
-    missing, unexpected = teacher.load_state_dict(cleaned, strict=False)
+    teacher = teacher.to_empty(device="cpu")
+    missing, unexpected = teacher.load_state_dict(backbone_sd, strict=False)
     if missing:
         logger.warning(f"Missing keys: {missing[:5]}")
     teacher = teacher.to(device).eval()
