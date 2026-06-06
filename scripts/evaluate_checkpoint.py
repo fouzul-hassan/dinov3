@@ -319,6 +319,8 @@ def knn_eval(
     # L2-normalise
     tf = nn.functional.normalize(train_feats, dim=1)
     qf = nn.functional.normalize(test_feats,  dim=1)
+    train_labels = train_labels.long()
+    test_labels  = test_labels.long()
 
     # Cosine similarity matrix  (chunk to avoid OOM)
     preds = []
@@ -329,7 +331,9 @@ def knn_eval(
         nn_labels = train_labels[topk]       # (chunk, k)
         vote = torch.zeros(len(nn_labels), num_classes)
         for j in range(k):
-            vote.scatter_add_(1, nn_labels[:, j:j+1], sim[i:i+chunk, topk[:, j]:topk[:, j]+1] * 0 + 1)
+            col_idx = nn_labels[:, j:j+1].long()               # (chunk, 1)
+            sim_col = torch.gather(sim[i:i+chunk], 1, topk[:, j:j+1])  # (chunk, 1)
+            vote.scatter_add_(1, col_idx, sim_col * 0 + 1)
         preds.append(vote.argmax(dim=1))
     preds = torch.cat(preds).numpy()
     true  = test_labels.numpy()
