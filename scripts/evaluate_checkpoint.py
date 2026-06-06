@@ -331,8 +331,8 @@ def knn_eval(
         nn_labels = train_labels[topk]       # (chunk, k)
         vote = torch.zeros(len(nn_labels), num_classes)
         for j in range(k):
-            col_idx = nn_labels[:, j:j+1].long()               # (chunk, 1)
-            sim_col = torch.gather(sim[i:i+chunk], 1, topk[:, j:j+1])  # (chunk, 1)
+            col_idx = nn_labels[:, j:j+1].long()          # (chunk, 1)
+            sim_col = torch.gather(sim, 1, topk[:, j:j+1])  # (chunk, 1)
             vote.scatter_add_(1, col_idx, sim_col * 0 + 1)
         preds.append(vote.argmax(dim=1))
     preds = torch.cat(preds).numpy()
