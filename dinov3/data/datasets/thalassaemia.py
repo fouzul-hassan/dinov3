@@ -255,21 +255,21 @@ class ThalassaemiaDataset(ExtendedVisionDataset):
     def get_target(self, index: int) -> Optional[_Target]:
         entries     = self._get_entries()
         class_index = entries[index]["class_index"]
-        return None if self._split == _Split.TEST else int(class_index)
+        return int(class_index)
 
     def get_targets(self) -> Optional[np.ndarray]:
         entries = self._get_entries()
-        return None if self._split == _Split.TEST else entries["class_index"]
+        return entries["class_index"]
 
     def get_class_id(self, index: int) -> Optional[str]:
         entries  = self._get_entries()
         class_id = entries[index]["class_id"]
-        return None if self._split == _Split.TEST else str(class_id)
+        return str(class_id)
 
     def get_class_name(self, index: int) -> Optional[str]:
         entries    = self._get_entries()
         class_name = entries[index]["class_name"]
-        return None if self._split == _Split.TEST else str(class_name)
+        return str(class_name)
 
     def __len__(self) -> int:
         return len(self._get_entries())
