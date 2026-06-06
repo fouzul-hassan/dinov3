@@ -215,15 +215,11 @@ class ThalassaemiaDataset(ExtendedVisionDataset):
         return self._entries
 
     def _get_class_ids(self) -> np.ndarray:
-        if self._split == _Split.TEST:
-            raise AssertionError("Class IDs are not available in TEST split")
         if self._class_ids is None:
             self._class_ids = self._load_extra(self._class_ids_path)
         return self._class_ids
 
     def _get_class_names(self) -> np.ndarray:
-        if self._split == _Split.TEST:
-            raise AssertionError("Class names are not available in TEST split")
         if self._class_names is None:
             self._class_names = self._load_extra(self._class_names_path)
         return self._class_names
