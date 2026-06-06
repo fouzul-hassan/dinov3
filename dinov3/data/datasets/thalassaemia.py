@@ -195,7 +195,7 @@ class ThalassaemiaDataset(ExtendedVisionDataset):
                 f"Metadata file not found: {full_path}\n"
                 f"Run scripts/preprocess_data.py first to generate metadata."
             )
-        return np.load(full_path, mmap_mode="r", allow_pickle=False)
+        return np.load(full_path, mmap_mode="r", allow_pickle=True)
 
     @property
     def _entries_path(self) -> str:
